@@ -73,6 +73,7 @@ const SLOT_SIZE: usize = 16384;
 type SlotMap = BTreeMap<u16, String>;
 
 /// This is a ClusterClientBuilder of Redis cluster client.
+
 pub struct ClusterClientBuilder {
     initial_nodes: RedisResult<Vec<ConnectionInfo>>,
     readonly: bool,
@@ -120,6 +121,7 @@ impl ClusterClientBuilder {
 }
 
 /// This is a Redis cluster client.
+#[derive(Clone)]
 pub struct ClusterClient {
     initial_nodes: Vec<ConnectionInfo>,
     readonly: bool,
