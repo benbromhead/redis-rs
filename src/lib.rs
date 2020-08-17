@@ -386,6 +386,9 @@ pub use crate::{
 
 mod macros;
 
+pub mod cluster_async;
+
+
 #[cfg(feature = "acl")]
 #[cfg_attr(docsrs, doc(cfg(feature = "acl")))]
 pub mod acl;

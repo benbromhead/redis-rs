@@ -522,20 +522,21 @@ fn get_socket_addrs(host: &str, port: u16) -> RedisResult<SocketAddr> {
 }
 
 /// An async abstraction over connections.
+#[async_trait]
 pub trait ConnectionLike {
     /// Sends an already encoded (packed) command into the TCP socket and
     /// reads the single response from it.
-    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value>;
+    async fn req_packed_command(& mut self, cmd: & Cmd) -> RedisResult<Value>;
 
     /// Sends multiple already encoded (packed) command into the TCP socket
     /// and reads `count` responses from it.  This is used to implement
     /// pipelining.
-    fn req_packed_commands<'a>(
-        &'a mut self,
-        cmd: &'a crate::Pipeline,
+    async fn req_packed_commands(
+        & mut self,
+        cmd: & crate::Pipeline,
         offset: usize,
         count: usize,
-    ) -> RedisFuture<'a, Vec<Value>>;
+    ) -> RedisResult<Vec<Value>>;
 
     /// Returns the database this connection is bound to.  Note that this
     /// information might be unreliable because it's initially cached and
@@ -544,47 +545,42 @@ pub trait ConnectionLike {
     fn get_db(&self) -> i64;
 }
 
+#[async_trait]
 impl ConnectionLike for Connection {
-    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-        (async move {
-            if self.pubsub {
-                self.exit_pubsub().await?;
-            }
-            self.buf.clear();
-            cmd.write_packed_command(&mut self.buf);
-            self.con.write_all(&self.buf).await?;
-            self.read_response().await
-        })
-        .boxed()
+    async fn req_packed_command<>(&mut self, cmd: &Cmd) -> RedisResult<Value> {
+        if self.pubsub {
+            self.exit_pubsub().await?;
+        }
+        self.buf.clear();
+        cmd.write_packed_command(&mut self.buf);
+        self.con.write_all(&self.buf).await?;
+        self.read_response().await
     }
 
-    fn req_packed_commands<'a>(
-        &'a mut self,
-        cmd: &'a crate::Pipeline,
+    async fn req_packed_commands(
+        & mut self,
+        cmd: & crate::Pipeline,
         offset: usize,
         count: usize,
-    ) -> RedisFuture<'a, Vec<Value>> {
-        (async move {
-            if self.pubsub {
-                self.exit_pubsub().await?;
-            }
+    ) -> RedisResult<Vec<Value>> {
+        if self.pubsub {
+            self.exit_pubsub().await?;
+        }
 
-            self.buf.clear();
-            cmd.write_packed_pipeline(&mut self.buf);
-            self.con.write_all(&self.buf).await?;
+        self.buf.clear();
+        cmd.write_packed_pipeline(&mut self.buf);
+        self.con.write_all(&self.buf).await?;
 
-            for _ in 0..offset {
-                self.read_response().await?;
-            }
+        for _ in 0..offset {
+            self.read_response().await?;
+        }
 
-            let mut rv = Vec::with_capacity(count);
-            for _ in 0..count {
-                rv.push(self.read_response().await?);
-            }
+        let mut rv = Vec::with_capacity(count);
+        for _ in 0..count {
+            rv.push(self.read_response().await?);
+        }
 
-            Ok(rv)
-        })
-        .boxed()
+        Ok(rv)
     }
 
     fn get_db(&self) -> i64 {
@@ -930,44 +926,39 @@ impl MultiplexedConnection {
     }
 }
 
+#[async_trait]
 impl ConnectionLike for MultiplexedConnection {
-    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-        (async move {
-            let value = self
-                .pipeline
-                .send(cmd.get_packed_command())
-                .await
-                .map_err(|err| {
-                    err.unwrap_or_else(|| {
-                        RedisError::from(io::Error::from(io::ErrorKind::BrokenPipe))
-                    })
-                })?;
-            Ok(value)
-        })
-        .boxed()
+    async fn req_packed_command(& mut self, cmd: & Cmd) -> RedisResult<Value> {
+        let value = self
+            .pipeline
+            .send(cmd.get_packed_command())
+            .await
+            .map_err(|err| {
+                err.unwrap_or_else(|| {
+                    RedisError::from(io::Error::from(io::ErrorKind::BrokenPipe))
+                })
+            })?;
+        Ok(value)
     }
 
-    fn req_packed_commands<'a>(
-        &'a mut self,
-        cmd: &'a crate::Pipeline,
+    async fn req_packed_commands(
+        & mut self,
+        cmd: & crate::Pipeline,
         offset: usize,
         count: usize,
-    ) -> RedisFuture<'a, Vec<Value>> {
-        (async move {
-            let mut value = self
-                .pipeline
-                .send_recv_multiple(cmd.get_packed_pipeline(), offset + count)
-                .await
-                .map_err(|err| {
-                    err.unwrap_or_else(|| {
-                        RedisError::from(io::Error::from(io::ErrorKind::BrokenPipe))
-                    })
-                })?;
+    ) -> RedisResult<Vec<Value>> {
+        let mut value = self
+            .pipeline
+            .send_recv_multiple(cmd.get_packed_pipeline(), offset + count)
+            .await
+            .map_err(|err| {
+                err.unwrap_or_else(|| {
+                    RedisError::from(io::Error::from(io::ErrorKind::BrokenPipe))
+                })
+            })?;
 
-            value.drain(..offset);
-            Ok(value)
-        })
-        .boxed()
+        value.drain(..offset);
+        Ok(value)
     }
 
     fn get_db(&self) -> i64 {
@@ -1139,44 +1130,39 @@ mod connection_manager {
         };
     }
 
+    #[async_trait]
     impl ConnectionLike for ConnectionManager {
-        fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-            (async move {
-                // Clone connection to avoid having to lock the ArcSwap in write mode
-                let guard = self.connection.load();
-                let connection_result = (**guard)
-                    .clone()
-                    .await
-                    .map_err(|e| e.clone_mostly("Reconnecting failed"));
-                reconnect_if_io_error!(self, connection_result, guard);
-                let result = connection_result?.req_packed_command(cmd).await;
-                reconnect_if_dropped!(self, &result, guard);
-                result
-            })
-            .boxed()
+        async fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisResult<Value> {
+            // Clone connection to avoid having to lock the ArcSwap in write mode
+            let guard = self.connection.load();
+            let connection_result = (**guard)
+                .clone()
+                .await
+                .map_err(|e| e.clone_mostly("Reconnecting failed"));
+            reconnect_if_io_error!(self, connection_result, guard);
+            let result = connection_result?.req_packed_command(cmd).await;
+            reconnect_if_dropped!(self, &result, guard);
+            result
         }
 
-        fn req_packed_commands<'a>(
+        async fn req_packed_commands<'a>(
             &'a mut self,
             cmd: &'a crate::Pipeline,
             offset: usize,
             count: usize,
-        ) -> RedisFuture<'a, Vec<Value>> {
-            (async move {
-                // Clone shared connection future to avoid having to lock the ArcSwap in write mode
-                let guard = self.connection.load();
-                let connection_result = (**guard)
-                    .clone()
-                    .await
-                    .map_err(|e| e.clone_mostly("Reconnecting failed"));
-                reconnect_if_io_error!(self, connection_result, guard);
-                let result = connection_result?
-                    .req_packed_commands(cmd, offset, count)
-                    .await;
-                reconnect_if_dropped!(self, &result, guard);
-                result
-            })
-            .boxed()
+        ) -> RedisResult<Vec<Value>> {
+            // Clone shared connection future to avoid having to lock the ArcSwap in write mode
+            let guard = self.connection.load();
+            let connection_result = (**guard)
+                .clone()
+                .await
+                .map_err(|e| e.clone_mostly("Reconnecting failed"));
+            reconnect_if_io_error!(self, connection_result, guard);
+            let result = connection_result?
+                .req_packed_commands(cmd, offset, count)
+                .await;
+            reconnect_if_dropped!(self, &result, guard);
+            result
         }
 
         fn get_db(&self) -> i64 {
