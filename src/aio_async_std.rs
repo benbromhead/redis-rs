@@ -13,14 +13,17 @@ use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Wraps the async_std TcpStream in order to implement the required Traits for it
+#[derive(Debug)]
 pub struct TcpStreamAsyncStdWrapped(TcpStream);
 
 /// Wraps the async_native_tls TlsStream in order to implement the required Traits for it
 #[cfg(feature = "tls")]
+#[derive(Debug)]
 pub struct TlsStreamAsyncStdWrapped(TlsStream<TcpStream>);
 
 #[cfg(unix)]
 /// Wraps the async_std UnixStream in order to implement the required Traits for it
+#[derive(Debug)]
 pub struct UnixStreamAsyncStdWrapped(UnixStream);
 
 impl AsyncWrite for TcpStreamAsyncStdWrapped {

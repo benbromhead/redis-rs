@@ -187,6 +187,7 @@ impl ClusterClient {
 }
 
 /// This is a connection of Redis cluster.
+#[derive(Debug)]
 pub struct ClusterConnection {
     initial_nodes: Vec<ConnectionInfo>,
     connections: Arc<Mutex<HashMap<String, Connection>>>,

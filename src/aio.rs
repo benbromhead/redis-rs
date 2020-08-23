@@ -10,6 +10,9 @@ use std::path::Path;
 use std::pin::Pin;
 use std::task::{self, Poll};
 
+use std::fmt::{Debug, Formatter};
+use std::fmt;
+
 use combine::{parser::combinator::AnySendSyncPartialState, stream::PointerOffset};
 
 #[cfg(all(unix, feature = "tokio-comp"))]
@@ -122,6 +125,7 @@ mod tokio_aio {
 }
 
 /// Represents an async Connection (TCP or Unix. Tokio or Async Std)
+#[derive(Debug)]
 pub(crate) enum ActualConnection {
     /// Represents a Tokio TCP connection.
     #[cfg(feature = "tokio-comp")]
@@ -317,6 +321,12 @@ pub struct Connection {
     /// This flag is checked when attempting to send a command, and if it's raised, we attempt to
     /// exit the pubsub state before executing the new request.
     pubsub: bool,
+}
+
+impl Debug for Connection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.con.fmt(f)
+    }
 }
 
 fn assert_sync<T: Sync>() {}
@@ -1173,3 +1183,4 @@ mod connection_manager {
 
 #[cfg(feature = "connection-manager")]
 pub use connection_manager::ConnectionManager;
+
