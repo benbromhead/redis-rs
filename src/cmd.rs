@@ -548,6 +548,14 @@ impl Pipeline {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.commands.len()
+    }
+
+    pub fn pop(&mut self) -> Option<Cmd> {
+        self.commands.pop()
+    }
+
     /// Starts a new command.  Functions such as `arg` then become
     /// available to add more arguments to that command.
     #[inline]
