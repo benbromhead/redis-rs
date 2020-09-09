@@ -27,8 +27,8 @@ pub struct Cmd {
 /// Represents a redis command pipeline.
 #[derive(Clone)]
 pub struct Pipeline {
-    commands: Vec<Cmd>,
-    transaction_mode: bool,
+    pub commands: Vec<Cmd>,
+    pub transaction_mode: bool,
 }
 
 /// Represents a redis iterator.

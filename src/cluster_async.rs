@@ -407,6 +407,8 @@ impl ClusterConnection {
         }
     }
 
+
+
     async fn get_connection<'a>(
         &'a self,
         connections: &'a mut HashMap<String, Connection>,
@@ -422,6 +424,19 @@ impl ClusterConnection {
             // try a random node next.  This is safe if slots are involved
             // as a wrong node would reject the request.
             Ok(get_random_connection(connections, None, &self.rng))
+        }
+    }
+
+
+    pub async fn get_connection_string(
+        &self,
+        slot: u16,
+    ) -> Option<String> {
+        let slots = self.slots.lock().await;
+        if let Some((_, addr)) = slots.range(&slot..).next() {
+            Some(addr.to_string())
+        } else {
+            None
         }
     }
 
@@ -763,7 +778,7 @@ fn get_hashtag(key: &[u8]) -> Option<&[u8]> {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum RoutingInfo {
+pub enum RoutingInfo {
     AllNodes,
     AllMasters,
     Random,
