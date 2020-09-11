@@ -6,7 +6,7 @@ use crate::types::{
 };
 
 /// An argument to a redis command
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Arg<D> {
     /// A normal argument
     Simple(D),
@@ -15,7 +15,7 @@ pub enum Arg<D> {
 }
 
 /// Represents redis commands.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Cmd {
     data: Vec<u8>,
     // Arg::Simple contains the offset that marks the end of the argument
