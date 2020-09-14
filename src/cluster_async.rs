@@ -67,6 +67,7 @@ use tokio::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::borrow::BorrowMut;
 use rand::prelude::SmallRng;
+use url::quirks::username;
 
 const SLOT_SIZE: usize = 16384;
 
@@ -78,6 +79,7 @@ pub struct ClusterClientBuilder {
     initial_nodes: RedisResult<Vec<ConnectionInfo>>,
     readonly: bool,
     password: Option<String>,
+    username: Option<String>,
 }
 
 impl ClusterClientBuilder {
@@ -90,6 +92,7 @@ impl ClusterClientBuilder {
                 .collect(),
             readonly: false,
             password: None,
+            username: None,
         }
     }
 
@@ -110,6 +113,12 @@ impl ClusterClientBuilder {
         self
     }
 
+    /// Set username for new ClusterClient.
+    pub fn username(mut self, username: String) -> ClusterClientBuilder {
+        self.username = Some(username);
+        self
+    }
+
     /// Set read only mode for new ClusterClient.
     /// Default is not read only mode.
     /// When it is set to readonly mode, all query use replica nodes except there are no replica nodes.
@@ -126,6 +135,7 @@ pub struct ClusterClient {
     initial_nodes: Vec<ConnectionInfo>,
     readonly: bool,
     password: Option<String>,
+    username: Option<String>,
 }
 
 impl ClusterClient {
@@ -150,6 +160,7 @@ impl ClusterClient {
             self.initial_nodes.clone(),
             self.readonly,
             self.password.clone(),
+            self.username.clone()
         ).await
     }
 
@@ -157,6 +168,7 @@ impl ClusterClient {
         let initial_nodes = builder.initial_nodes?;
         let mut nodes = Vec::with_capacity(initial_nodes.len());
         let mut connection_info_password = None::<String>;
+        let mut connection_info_username = None::<String>;
 
         for (index, info) in initial_nodes.into_iter().enumerate() {
             if let ConnectionAddr::Unix(_) = *info.addr {
@@ -175,6 +187,17 @@ impl ClusterClient {
                 }
             }
 
+            if builder.username.is_none() {
+                if index == 0 {
+                    connection_info_username = info.username.clone();
+                } else if connection_info_username != info.username {
+                    return Err(RedisError::from((
+                        ErrorKind::InvalidClientConfig,
+                        "Cannot use different username among initial nodes.",
+                    )));
+                }
+            }
+
             nodes.push(info);
         }
 
@@ -182,6 +205,7 @@ impl ClusterClient {
             initial_nodes: nodes,
             readonly: builder.readonly,
             password: builder.password.or(connection_info_password),
+            username: builder.username.or(connection_info_username),
         })
     }
 }
@@ -195,6 +219,7 @@ pub struct ClusterConnection {
     auto_reconnect: AtomicBool,
     readonly: bool,
     password: Option<String>,
+    username: Option<String>,
     rng: SmallRng
 }
 
@@ -203,9 +228,10 @@ impl ClusterConnection {
         initial_nodes: Vec<ConnectionInfo>,
         readonly: bool,
         password: Option<String>,
+        username: Option<String>,
     ) -> RedisResult<ClusterConnection> {
         let connections =
-            Self::create_initial_connections(&initial_nodes, readonly, password.clone()).await?;
+            Self::create_initial_connections(&initial_nodes, readonly, password.clone(), username.clone()).await?;
         let connection = ClusterConnection {
             initial_nodes,
             connections: Arc::new(Mutex::new(connections)),
@@ -213,6 +239,7 @@ impl ClusterConnection {
             auto_reconnect: AtomicBool::new(true),
             readonly,
             password,
+            username,
             rng: SmallRng::from_entropy()
         };
         connection.refresh_slots().await?;
@@ -279,6 +306,7 @@ impl ClusterConnection {
         initial_nodes: &[ConnectionInfo],
         readonly: bool,
         password: Option<String>,
+        username: Option<String>,
     ) -> RedisResult<HashMap<String, Connection>> {
         let mut connections = HashMap::with_capacity(initial_nodes.len());
 
@@ -288,7 +316,7 @@ impl ClusterConnection {
                 _ => panic!("No reach."),
             };
 
-            if let Ok(mut conn) = connect(info.clone(), readonly, password.clone()).await {
+            if let Ok(mut conn) = connect(info.clone(), readonly, password.clone(), username.clone()).await {
                 if check_connection(&mut conn).await {
                     connections.insert(addr, conn);
                     break;
@@ -338,7 +366,7 @@ impl ClusterConnection {
                     }
 
                     if let Ok(mut conn) =
-                    connect(addr.as_ref(), self.readonly, self.password.clone()).await
+                    connect(addr.as_ref(), self.readonly, self.password.clone(), self.username.clone()).await
                     {
                         if check_connection(&mut conn).await {
                             new_connections.insert(addr.to_string(), conn);
@@ -450,7 +478,7 @@ impl ClusterConnection {
         } else {
             // Create new connection.
             // TODO: error handling
-            let conn = connect(addr, self.readonly, self.password.clone()).await?;
+            let conn = connect(addr, self.readonly, self.password.clone(), self. username.clone()).await?;
             Ok(connections.entry(addr.to_string()).or_insert(conn))
         }
     }
@@ -571,6 +599,7 @@ impl ConnectionLike for ClusterConnection {
                             &self.initial_nodes,
                             self.readonly,
                             self.password.clone(),
+                            self.username.clone(),
                         ).await?;
                         {
                             let mut connections = self.connections.lock().await;
@@ -677,6 +706,7 @@ impl ConnectionLike for ClusterConnection {
                             &self.initial_nodes,
                             self.readonly,
                             self.password.clone(),
+                            self.username.clone()
                         ).await?;
                         {
                             let mut connections = self.connections.lock().await;
@@ -715,12 +745,14 @@ async fn connect<T: IntoConnectionInfo>(
     info: T,
     readonly: bool,
     password: Option<String>,
+    username: Option<String>,
 ) -> RedisResult<Connection>
     where
         T: std::fmt::Debug,
 {
     let mut connection_info = info.into_connection_info()?;
     connection_info.passwd = password;
+    connection_info.username = username;
     let client = super::Client::open(connection_info)?;
 
     let mut con = client.get_async_connection().await?;
