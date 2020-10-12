@@ -51,7 +51,7 @@ use super::{
     ErrorKind, IntoConnectionInfo, RedisError, RedisResult, Value
 };
 use crate::aio::{Connection, ConnectionLike};
-use crate::RedisFuture;
+use crate::{RedisFuture, Pipeline};
 
 use futures_util::{
     future::{Future, FutureExt, TryFutureExt},
@@ -67,7 +67,6 @@ use tokio::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::borrow::BorrowMut;
 use rand::prelude::SmallRng;
-use url::quirks::username;
 
 const SLOT_SIZE: usize = 16384;
 
@@ -673,11 +672,14 @@ impl ConnectionLike for ClusterConnection {
                 } else {
                     self.get_connection(&mut *connections, slot.unwrap()).await?
                 };
-                (addr, conn.req_packed_commands(cmd, offset, count).await)
+                (addr, conn.req_packed_commands_with_errors(cmd, offset, count).await)
             };
 
             match rv {
-                Ok(rv) => return Ok(rv),
+                Ok(rv) => {
+                    let intermediate: Result<Vec<_>, _> = rv.into_iter().map(|r| r).collect();
+                    return intermediate;
+                },
                 Err(err) => {
                     retries -= 1;
                     if retries == 0 {
@@ -732,6 +734,111 @@ impl ConnectionLike for ClusterConnection {
 
     fn get_db(&self) -> i64 {
         0
+    }
+
+    async fn req_packed_commands_raw(&mut self, cmd: &Pipeline, offset: usize, count: usize) -> RedisResult<Vec<RedisResult<Value>>> {
+
+        let slot = match RoutingInfo::for_packed_command_bytes(&cmd.get_packed_pipeline()) {
+            Some(RoutingInfo::Random) => None,
+            Some(RoutingInfo::Slot(slot)) => Some(slot),
+            Some(RoutingInfo::AllNodes) | Some(RoutingInfo::AllMasters) => {
+
+                let mut connections = self.connections.lock().await;
+                let mut results = HashMap::new();
+
+                // TODO: reconnect and shit
+                for (addr, connection) in connections.iter_mut() {
+                    results.insert(addr.as_str(), connection.req_packed_commands_with_errors(cmd, offset, count).await?);
+                }
+
+                return Ok(results.values().flatten().cloned().collect());
+            }
+            None => {
+                return Err((
+                    ErrorKind::ClientError,
+                    "this command cannot be safely routed in cluster mode",
+                )
+                    .into())
+            }
+        };
+
+        let mut retries = 16;
+        let mut excludes = HashSet::new();
+        let mut asking = None::<String>;
+        loop {
+            // Get target address and response.
+            let (addr, rv) = {
+                let mut connections = self.connections.lock().await;
+                let (addr, conn) = if let Some(addr) = asking.take() {
+                    let conn = self.get_connection_by_addr(&mut *connections, &addr).await?;
+                    // if we are in asking mode we want to feed a single
+                    // ASKING command into the connection before what we
+                    // actually want to execute.
+                    let askcmd = crate::cmd("ASKING");
+                    conn.req_packed_command(&askcmd).await?;
+                    (addr.to_string(), conn)
+                } else if !excludes.is_empty() || slot.is_none() {
+                    get_random_connection(&mut *connections, Some(&excludes), &self.rng)
+                } else {
+                    self.get_connection(&mut *connections, slot.unwrap()).await?
+                };
+                (addr, conn.req_packed_commands_with_errors(cmd, offset, count).await)
+            };
+
+            match rv {
+                Ok(rv) => {
+                    return Ok(rv);
+                },
+                Err(err) => {
+                    retries -= 1;
+                    if retries == 0 {
+                        return Err(err);
+                    }
+
+                    if err.is_cluster_error() {
+                        let kind = err.kind();
+
+                        if kind == ErrorKind::Ask {
+                            asking = err.redirect_node().map(|x| x.0.to_string());
+                        } else if kind == ErrorKind::Moved {
+                            // Refresh slots and request again.
+                            self.refresh_slots().await?;
+                            excludes.clear();
+                            continue;
+                        } else if kind == ErrorKind::TryAgain || kind == ErrorKind::ClusterDown {
+                            // Sleep and retry.
+                            let sleep_time = 2u64.pow(16 - retries.max(9)) * 10;
+                            thread::sleep(Duration::from_millis(sleep_time));
+                            excludes.clear();
+                            continue;
+                        }
+                    } else if self.auto_reconnect.fetch_and(true, Ordering::Relaxed) && err.is_io_error() {
+                        let new_connections = Self::create_initial_connections(
+                            &self.initial_nodes,
+                            self.readonly,
+                            self.password.clone(),
+                            self.username.clone()
+                        ).await?;
+                        {
+                            let mut connections = self.connections.lock().await;
+                            *connections = new_connections;
+                        }
+                        self.refresh_slots().await?;
+                        excludes.clear();
+                        continue;
+                    } else {
+                        return Err(err);
+                    }
+
+                    excludes.insert(addr);
+
+                    let connections = self.connections.lock().await;
+                    if excludes.len() >= connections.len() {
+                        return Err(err);
+                    }
+                }
+            }
+        }
     }
 }
 

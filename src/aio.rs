@@ -553,6 +553,13 @@ pub trait ConnectionLike {
     /// also might be incorrect if the connection like object is not
     /// actually connected.
     fn get_db(&self) -> i64;
+
+    async fn req_packed_commands_raw(
+        & mut self,
+        cmd: &crate::Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisResult<Vec<RedisResult<Value>>>;
 }
 
 #[async_trait]
@@ -595,6 +602,38 @@ impl ConnectionLike for Connection {
 
     fn get_db(&self) -> i64 {
         self.db
+    }
+
+    async fn req_packed_commands_raw(&mut self, cmd: &crate::Pipeline, offset: usize, count: usize) -> RedisResult<Vec<RedisResult<Value>>> {
+        unimplemented!()
+    }
+}
+
+impl Connection {
+    pub(crate) async fn req_packed_commands_with_errors(
+        & mut self,
+        cmd: & crate::Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisResult<Vec<RedisResult<Value>>> {
+        if self.pubsub {
+            self.exit_pubsub().await?;
+        }
+
+        self.buf.clear();
+        cmd.write_packed_pipeline(&mut self.buf);
+        self.con.write_all(&self.buf).await?;
+
+        for _ in 0..offset {
+            self.read_response().await?;
+        }
+
+        let mut rv = Vec::with_capacity(count);
+        for _ in 0..count {
+            rv.push(self.read_response().await);
+        }
+
+        Ok(rv)
     }
 }
 
@@ -974,6 +1013,10 @@ impl ConnectionLike for MultiplexedConnection {
     fn get_db(&self) -> i64 {
         self.db
     }
+
+    async fn req_packed_commands_raw(&mut self, cmd: &crate::Pipeline, offset: usize, count: usize) -> RedisResult<Vec<RedisResult<Value>>> {
+        unimplemented!()
+    }
 }
 
 #[cfg(feature = "connection-manager")]
@@ -1177,6 +1220,10 @@ mod connection_manager {
 
         fn get_db(&self) -> i64 {
             self.connection_info.db
+        }
+
+        async fn req_packed_commands_raw(&mut self, cmd: &crate::Pipeline, offset: usize, count: usize) -> RedisResult<Vec<RedisResult<Value>>> {
+            unimplemented!()
         }
     }
 }

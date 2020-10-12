@@ -202,6 +202,12 @@ pub struct RedisError {
     repr: ErrorRepr,
 }
 
+impl Clone for RedisError {
+    fn clone(&self) -> Self {
+        self.clone_mostly("Cloned io error")
+    }
+}
+
 #[derive(Debug)]
 enum ErrorRepr {
     WithDescription(ErrorKind, &'static str),
@@ -486,7 +492,7 @@ impl RedisError {
     ///
     /// The `ioerror_description` parameter will be prepended to the message in
     /// case an `IoError` is found.
-    #[cfg(feature = "connection-manager")] // Used to avoid "unused method" warning
+    // #[cfg(feature = "connection-manager")] // Used to avoid "unused method" warning
     pub(crate) fn clone_mostly(&self, ioerror_description: &'static str) -> Self {
         let repr = match self.repr {
             ErrorRepr::WithDescription(kind, desc) => ErrorRepr::WithDescription(kind, desc),

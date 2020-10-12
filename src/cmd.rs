@@ -734,6 +734,17 @@ impl Pipeline {
     }
 
     #[cfg(feature = "aio")]
+    pub async fn execute_pipelined_async_raw<C>(&self, con: &mut C) -> RedisResult<Vec<RedisResult<Value>>>
+    where
+        C: crate::aio::ConnectionLike,
+    {
+        let value = con
+            .req_packed_commands_raw(self, 0, self.commands.len())
+            .await?;
+        Ok(value)
+    }
+
+    #[cfg(feature = "aio")]
     async fn execute_transaction_async<C>(&self, con: &mut C) -> RedisResult<Value>
     where
         C: crate::aio::ConnectionLike,
