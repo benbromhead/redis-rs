@@ -219,7 +219,7 @@ pub struct ClusterConnection {
     readonly: bool,
     password: Option<String>,
     username: Option<String>,
-    rng: SmallRng
+    pub rng: SmallRng
 }
 
 impl ClusterConnection {
