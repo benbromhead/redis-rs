@@ -63,7 +63,6 @@ use futures_util::{
 use async_trait::async_trait;
 use combine::lib::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::borrow::BorrowMut;
 use rand::prelude::SmallRng;
@@ -213,8 +212,8 @@ impl ClusterClient {
 #[derive(Debug)]
 pub struct ClusterConnection {
     initial_nodes: Vec<ConnectionInfo>,
-    connections: Arc<Mutex<HashMap<String, Connection>>>,
-    slots: Arc<Mutex<SlotMap>>,
+    pub connections: HashMap<String, Connection>,
+    slots: SlotMap,
     auto_reconnect: AtomicBool,
     readonly: bool,
     password: Option<String>,
@@ -223,6 +222,20 @@ pub struct ClusterConnection {
 }
 
 impl ClusterConnection {
+    pub fn empty() -> ClusterConnection {
+        ClusterConnection {
+            initial_nodes: vec![],
+            connections: Default::default(),
+            slots: Default::default(),
+            auto_reconnect: Default::default(),
+            readonly: false,
+            password: None,
+            username: None,
+            rng: SmallRng::from_entropy()
+        }
+    }
+
+
     async fn new(
         initial_nodes: Vec<ConnectionInfo>,
         readonly: bool,
@@ -231,10 +244,10 @@ impl ClusterConnection {
     ) -> RedisResult<ClusterConnection> {
         let connections =
             Self::create_initial_connections(&initial_nodes, readonly, password.clone(), username.clone()).await?;
-        let connection = ClusterConnection {
+        let mut connection = ClusterConnection {
             initial_nodes,
-            connections: Arc::new(Mutex::new(connections)),
-            slots: Arc::new(Mutex::new(SlotMap::new())),
+            connections: connections,
+            slots: SlotMap::new(),
             auto_reconnect: AtomicBool::new(true),
             readonly,
             password,
@@ -285,7 +298,7 @@ impl ClusterConnection {
 
     /// Check that all connections it has are available (`PING` internally).
     pub async fn check_connection(&mut self) -> bool {
-        for conn in self.connections.lock().await.values_mut() {
+        for conn in self.connections.values_mut() {
             if !check_connection(conn).await {
                 return false;
             }
@@ -333,9 +346,8 @@ impl ClusterConnection {
     }
 
     // Query a node to discover slot-> master mappings.
-    async fn refresh_slots(&self) -> RedisResult<()> {
-        let mut slots = self.slots.lock().await;
-        *slots = if self.readonly {
+    async fn refresh_slots(&mut self) -> RedisResult<()> {
+        self.slots = if self.readonly {
             let mut rng = self.rng.clone();
             self.create_new_slots(|slot_data| {
                 let replicas = slot_data.replicas();
@@ -349,15 +361,14 @@ impl ClusterConnection {
             self.create_new_slots(|slot_data| slot_data.master().to_string()).await?
         };
 
-        let mut connections = self.connections.lock().await;
-        *connections = {
+        self.connections = {
             // Remove dead connections and connect to new nodes if necessary
-            let mut new_connections = HashMap::with_capacity(connections.len());
+            let mut new_connections = HashMap::with_capacity(self.connections.len());
 
-            for addr in slots.values() {
+            for addr in self.slots.values() {
                 if !new_connections.contains_key(addr) {
-                    if connections.contains_key(addr) {
-                        let mut conn = connections.remove(addr).unwrap();
+                    if self.connections.contains_key(addr) {
+                        let mut conn = self.connections.remove(addr).unwrap();
                         if check_connection(&mut conn).await {
                             new_connections.insert(addr.to_string(), conn);
                             continue;
@@ -379,15 +390,14 @@ impl ClusterConnection {
         Ok(())
     }
 
-    async fn create_new_slots<F>(&self, mut get_addr: F) -> RedisResult<SlotMap>
+    async fn create_new_slots<F>(&mut self, mut get_addr: F) -> RedisResult<SlotMap>
         where
             F: FnMut(&Slot) -> String,
     {
-        let mut connections = self.connections.lock().await;
         let mut new_slots = None;
         let mut rng = self.rng.clone();
-        let len = connections.len();
-        let mut samples = connections.values_mut().choose_multiple(&mut rng, len);
+        let len = self.connections.len();
+        let mut samples = self.connections.values_mut().choose_multiple(&mut rng, len);
 
         for mut conn in samples.iter_mut() {
             if let Ok(mut slots_data) = get_slots(&mut conn).await {
@@ -436,30 +446,28 @@ impl ClusterConnection {
 
 
 
-    async fn get_connection<'a>(
-        &'a self,
-        connections: &'a mut HashMap<String, Connection>,
+    async fn get_connection(
+        &mut self,
         slot: u16,
-    ) -> RedisResult<(String, &'a mut Connection)> {
-        let slots = self.slots.lock().await;
-        if let Some((_, addr)) = slots.range(&slot..).next() {
+    ) -> RedisResult<(String, &mut Connection)> {
+        if let Some((_, addr)) = self.slots.range(&slot..).next() {
+            let address = addr.clone();
             Ok((
                 addr.to_string(),
-                self.get_connection_by_addr(connections, addr).await?,
+                self.get_connection_by_addr(&address).await?,
             ))
         } else {
             // try a random node next.  This is safe if slots are involved
             // as a wrong node would reject the request.
-            Ok(get_random_connection(connections, None, &self.rng))
+            Ok(get_random_connection(&mut self.connections, None, &self.rng))
         }
     }
 
-
     pub async fn get_connection_string(
-        &self,
+        &mut self,
         slot: u16,
     ) -> Option<String> {
-        let slots = self.slots.lock().await;
+        let slots = &mut self.slots;
         if let Some((_, addr)) = slots.range(&slot..).next() {
             Some(addr.to_string())
         } else {
@@ -467,18 +475,17 @@ impl ClusterConnection {
         }
     }
 
-    async fn get_connection_by_addr<'a>(
-        &self,
-        connections: &'a mut HashMap<String, Connection>,
+    async fn get_connection_by_addr(
+        &mut self,
         addr: &str,
-    ) -> RedisResult<&'a mut Connection> {
-        if connections.contains_key(addr) {
-            Ok(connections.get_mut(addr).unwrap())
+    ) -> RedisResult<&mut Connection> {
+        if self.connections.contains_key(addr) {
+            Ok(self.connections.get_mut(addr).unwrap())
         } else {
             // Create new connection.
             // TODO: error handling
             let conn = connect(addr, self.readonly, self.password.clone(), self. username.clone()).await?;
-            Ok(connections.entry(addr.to_string()).or_insert(conn))
+            Ok(self.connections.entry(addr.to_string()).or_insert(conn))
         }
     }
 }
@@ -518,7 +525,7 @@ impl ConnectionLike for ClusterConnection {
             Some(RoutingInfo::Random) => None,
             Some(RoutingInfo::Slot(slot)) => Some(slot),
             Some(RoutingInfo::AllNodes) | Some(RoutingInfo::AllMasters) => {
-                let mut connections = self.connections.lock().await;
+                let mut connections = &mut self.connections;
                 let mut results = HashMap::new();
 
                 // TODO: reconnect and shit
@@ -551,9 +558,8 @@ impl ConnectionLike for ClusterConnection {
         loop {
             // Get target address and response.
             let (addr, rv) = {
-                let mut connections = self.connections.lock().await;
                 let (addr, conn) = if let Some(addr) = asking.take() {
-                    let conn = self.get_connection_by_addr(&mut *connections, &addr).await?;
+                    let conn = self.get_connection_by_addr(&addr).await?;
                     // if we are in asking mode we want to feed a single
                     // ASKING command into the connection before what we
                     // actually want to execute.
@@ -561,9 +567,9 @@ impl ConnectionLike for ClusterConnection {
                     conn.req_packed_command(&askcmd).await?;
                     (addr.to_string(), conn)
                 } else if !excludes.is_empty() || slot.is_none() {
-                    get_random_connection(&mut *connections, Some(&excludes), &self.rng)
+                    get_random_connection(&mut self.connections, Some(&excludes), &self.rng)
                 } else {
-                    self.get_connection(&mut *connections, slot.unwrap()).await?
+                    self.get_connection(slot.unwrap()).await?
                 };
                 (addr, conn.req_packed_command(cmd).await)
             };
@@ -601,8 +607,7 @@ impl ConnectionLike for ClusterConnection {
                             self.username.clone(),
                         ).await?;
                         {
-                            let mut connections = self.connections.lock().await;
-                            *connections = new_connections;
+                            self.connections = new_connections;
                         }
                         self.refresh_slots().await?;
                         excludes.clear();
@@ -613,7 +618,7 @@ impl ConnectionLike for ClusterConnection {
 
                     excludes.insert(addr);
 
-                    let connections = self.connections.lock().await;
+                    let mut connections = &mut self.connections;
                     if excludes.len() >= connections.len() {
                         return Err(err);
                     }
@@ -633,7 +638,7 @@ impl ConnectionLike for ClusterConnection {
             Some(RoutingInfo::Slot(slot)) => Some(slot),
             Some(RoutingInfo::AllNodes) | Some(RoutingInfo::AllMasters) => {
 
-                let mut connections = self.connections.lock().await;
+                let mut connections = &mut self.connections;
                 let mut results = HashMap::new();
 
                 // TODO: reconnect and shit
@@ -658,9 +663,8 @@ impl ConnectionLike for ClusterConnection {
         loop {
             // Get target address and response.
             let (addr, rv) = {
-                let mut connections = self.connections.lock().await;
                 let (addr, conn) = if let Some(addr) = asking.take() {
-                    let conn = self.get_connection_by_addr(&mut *connections, &addr).await?;
+                    let conn = self.get_connection_by_addr( &addr).await?;
                     // if we are in asking mode we want to feed a single
                     // ASKING command into the connection before what we
                     // actually want to execute.
@@ -668,9 +672,9 @@ impl ConnectionLike for ClusterConnection {
                     conn.req_packed_command(&askcmd).await?;
                     (addr.to_string(), conn)
                 } else if !excludes.is_empty() || slot.is_none() {
-                    get_random_connection(&mut *connections, Some(&excludes), &self.rng)
+                    get_random_connection(&mut self.connections, Some(&excludes), &self.rng)
                 } else {
-                    self.get_connection(&mut *connections, slot.unwrap()).await?
+                    self.get_connection( slot.unwrap()).await?
                 };
                 (addr, conn.req_packed_commands_with_errors(cmd, offset, count).await)
             };
@@ -711,8 +715,7 @@ impl ConnectionLike for ClusterConnection {
                             self.username.clone()
                         ).await?;
                         {
-                            let mut connections = self.connections.lock().await;
-                            *connections = new_connections;
+                            self.connections = new_connections;
                         }
                         self.refresh_slots().await?;
                         excludes.clear();
@@ -723,7 +726,7 @@ impl ConnectionLike for ClusterConnection {
 
                     excludes.insert(addr);
 
-                    let connections = self.connections.lock().await;
+                    let mut connections = &mut self.connections;
                     if excludes.len() >= connections.len() {
                         return Err(err);
                     }
@@ -743,7 +746,7 @@ impl ConnectionLike for ClusterConnection {
             Some(RoutingInfo::Slot(slot)) => Some(slot),
             Some(RoutingInfo::AllNodes) | Some(RoutingInfo::AllMasters) => {
 
-                let mut connections = self.connections.lock().await;
+                let mut connections = &mut self.connections;
                 let mut results = HashMap::new();
 
                 // TODO: reconnect and shit
@@ -768,9 +771,8 @@ impl ConnectionLike for ClusterConnection {
         loop {
             // Get target address and response.
             let (addr, rv) = {
-                let mut connections = self.connections.lock().await;
                 let (addr, conn) = if let Some(addr) = asking.take() {
-                    let conn = self.get_connection_by_addr(&mut *connections, &addr).await?;
+                    let conn = self.get_connection_by_addr(&addr).await?;
                     // if we are in asking mode we want to feed a single
                     // ASKING command into the connection before what we
                     // actually want to execute.
@@ -778,9 +780,9 @@ impl ConnectionLike for ClusterConnection {
                     conn.req_packed_command(&askcmd).await?;
                     (addr.to_string(), conn)
                 } else if !excludes.is_empty() || slot.is_none() {
-                    get_random_connection(&mut *connections, Some(&excludes), &self.rng)
+                    get_random_connection(&mut self.connections, Some(&excludes), &self.rng)
                 } else {
-                    self.get_connection(&mut *connections, slot.unwrap()).await?
+                    self.get_connection(slot.unwrap()).await?
                 };
                 (addr, conn.req_packed_commands_with_errors(cmd, offset, count).await)
             };
@@ -820,8 +822,7 @@ impl ConnectionLike for ClusterConnection {
                             self.username.clone()
                         ).await?;
                         {
-                            let mut connections = self.connections.lock().await;
-                            *connections = new_connections;
+                            self.connections = new_connections;
                         }
                         self.refresh_slots().await?;
                         excludes.clear();
@@ -832,7 +833,7 @@ impl ConnectionLike for ClusterConnection {
 
                     excludes.insert(addr);
 
-                    let connections = self.connections.lock().await;
+                    let mut connections = &mut self.connections;
                     if excludes.len() >= connections.len() {
                         return Err(err);
                     }
