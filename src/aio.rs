@@ -605,7 +605,7 @@ impl ConnectionLike for Connection {
     }
 
     async fn req_packed_commands_raw(&mut self, cmd: &crate::Pipeline, offset: usize, count: usize) -> RedisResult<Vec<RedisResult<Value>>> {
-        unimplemented!()
+        self.req_packed_commands_with_errors(cmd, offset, count).await
     }
 }
 
