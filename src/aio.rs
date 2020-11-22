@@ -50,7 +50,7 @@ use crate::connection::{ConnectionAddr, ConnectionInfo};
 
 #[cfg(any(feature = "tokio-comp", feature = "async-std-comp"))]
 use crate::parser::ValueCodec;
-use crate::types::{ErrorKind, RedisError, RedisFuture, RedisResult, Value};
+use crate::types::{ErrorKind, RedisError, RedisResult, Value};
 use crate::{from_redis_value, ToRedisArgs};
 
 #[cfg(feature = "async-std-comp")]

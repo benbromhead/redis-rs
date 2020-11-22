@@ -38,33 +38,23 @@
 //!     .expire(key, 60).ignore()
 //!     .query(&mut connection).unwrap();
 //! ```
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::iter::Iterator;
 use std::thread;
 use std::time::Duration;
 
-use rand::{seq::{IteratorRandom, SliceRandom}, thread_rng, SeedableRng};
+use rand::{seq::{IteratorRandom, SliceRandom}, SeedableRng};
 
 use super::{
     cmd, parse_redis_value, Cmd, ConnectionAddr, ConnectionInfo,
     ErrorKind, IntoConnectionInfo, RedisError, RedisResult, Value
 };
 use crate::aio::{Connection, ConnectionLike};
-use crate::{RedisFuture, Pipeline};
-
-use futures_util::{
-    future::{Future, FutureExt, TryFutureExt},
-    ready,
-    sink::Sink,
-    stream::{Stream, StreamExt, TryStreamExt as _},
-};
+use crate::{Pipeline};
 
 use async_trait::async_trait;
 use combine::lib::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::borrow::BorrowMut;
 use rand::prelude::SmallRng;
 
 const SLOT_SIZE: usize = 16384;
@@ -285,7 +275,7 @@ impl ClusterConnection {
     /// If the provided value is `None`, then `recv_response` call will
     /// block indefinitely. It is an error to pass the zero `Duration` to this
     /// method.
-    pub fn set_read_timeout(&self, dur: Option<Duration>) -> RedisResult<()> {
+    pub fn set_read_timeout(&self, _dur: Option<Duration>) -> RedisResult<()> {
         // let connections = self.connections.borrow();
         // for conn in connections.values() {
         //     conn.set_read_timeout(dur)?;
@@ -346,7 +336,7 @@ impl ClusterConnection {
     }
 
     // Query a node to discover slot-> master mappings.
-    async fn refresh_slots(&mut self) -> RedisResult<()> {
+    pub async fn refresh_slots(&mut self) -> RedisResult<()> {
         self.slots = if self.readonly {
             let mut rng = self.rng.clone();
             self.create_new_slots(|slot_data| {
@@ -525,7 +515,7 @@ impl ConnectionLike for ClusterConnection {
             Some(RoutingInfo::Random) => None,
             Some(RoutingInfo::Slot(slot)) => Some(slot),
             Some(RoutingInfo::AllNodes) | Some(RoutingInfo::AllMasters) => {
-                let mut connections = &mut self.connections;
+                let connections = &mut self.connections;
                 let mut results = HashMap::new();
 
                 // TODO: reconnect and shit
@@ -618,7 +608,7 @@ impl ConnectionLike for ClusterConnection {
 
                     excludes.insert(addr);
 
-                    let mut connections = &mut self.connections;
+                    let connections = &mut self.connections;
                     if excludes.len() >= connections.len() {
                         return Err(err);
                     }
@@ -726,7 +716,7 @@ impl ConnectionLike for ClusterConnection {
 
                     excludes.insert(addr);
 
-                    let mut connections = &mut self.connections;
+                    let connections = &mut self.connections;
                     if excludes.len() >= connections.len() {
                         return Err(err);
                     }
@@ -746,7 +736,7 @@ impl ConnectionLike for ClusterConnection {
             Some(RoutingInfo::Slot(slot)) => Some(slot),
             Some(RoutingInfo::AllNodes) | Some(RoutingInfo::AllMasters) => {
 
-                let mut connections = &mut self.connections;
+                let connections = &mut self.connections;
                 let mut results = HashMap::new();
 
                 // TODO: reconnect and shit
@@ -833,7 +823,7 @@ impl ConnectionLike for ClusterConnection {
 
                     excludes.insert(addr);
 
-                    let mut connections = &mut self.connections;
+                    let connections = &mut self.connections;
                     if excludes.len() >= connections.len() {
                         return Err(err);
                     }
